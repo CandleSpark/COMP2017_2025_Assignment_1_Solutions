@@ -3,6 +3,22 @@
 #include <string.h>
 #include <math.h>
 
+// WAV chunk header structure
+struct chunk_header {
+    char id[4];
+    uint32_t size;
+};
+
+// WAV format chunk
+struct fmt_chunk {
+    uint16_t format;
+    uint16_t channels;
+    uint32_t sample_rate;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+};
+
 // WAV file header structure
 struct wav_header {
     char riff_id[4];
@@ -23,38 +39,121 @@ struct wav_header {
 // Part 1: WAV file interaction and basic sound operations
 int16_t* wav_load(const char* filename, size_t* length) {
     FILE* file = fopen(filename, "rb");
-    if (!file) return NULL;
+    if (!file) {
+        printf("wav_load: Cannot open file\n");
+        return NULL;
+    }
 
-    struct wav_header header;
-    if (fread(&header, sizeof(header), 1, file) != 1) {
+    // Read RIFF header
+    struct chunk_header riff_header;
+    if (fread(&riff_header, sizeof(riff_header), 1, file) != 1) {
+        printf("wav_load: Failed to read RIFF header\n");
         fclose(file);
         return NULL;
     }
 
-    // Verify WAV file format
-    if (memcmp(header.riff_id, "RIFF", 4) != 0 ||
-        memcmp(header.wave_id, "WAVE", 4) != 0 ||
-        memcmp(header.fmt_id, "fmt ", 4) != 0 ||
-        memcmp(header.data_id, "data", 4) != 0) {
+    // Verify RIFF header
+    if (memcmp(riff_header.id, "RIFF", 4) != 0) {
+        printf("wav_load: Invalid RIFF header\n");
         fclose(file);
         return NULL;
     }
 
-    *length = header.data_size / sizeof(int16_t);
-    int16_t* samples = malloc(header.data_size);
-    if (!samples) {
+    // Read WAVE ID
+    char wave_id[4];
+    if (fread(wave_id, sizeof(wave_id), 1, file) != 1) {
+        printf("wav_load: Failed to read WAVE ID\n");
         fclose(file);
         return NULL;
     }
 
-    if (fread(samples, 1, header.data_size, file) != header.data_size) {
-        free(samples);
+    // Verify WAVE format
+    if (memcmp(wave_id, "WAVE", 4) != 0) {
+        printf("wav_load: Invalid WAVE format\n");
         fclose(file);
         return NULL;
+    }
+
+    struct fmt_chunk fmt;
+    bool found_fmt = false;
+    bool found_data = false;
+    int16_t* samples = NULL;
+    uint32_t data_size = 0;
+
+    // Read chunks until we find both fmt and data
+    while (!found_data) {
+        struct chunk_header chunk;
+        if (fread(&chunk, sizeof(chunk), 1, file) != 1) {
+            printf("wav_load: Failed to read chunk header\n");
+            break;
+        }
+
+        printf("Found chunk: %.4s, size: %u\n", chunk.id, chunk.size);
+
+        if (memcmp(chunk.id, "fmt ", 4) == 0) {
+            // Read format chunk
+            if (fread(&fmt, sizeof(fmt), 1, file) != 1) {
+                printf("wav_load: Failed to read fmt chunk\n");
+                break;
+            }
+            found_fmt = true;
+            
+            // Skip any extra format bytes
+            if (chunk.size > sizeof(fmt)) {
+                fseek(file, chunk.size - sizeof(fmt), SEEK_CUR);
+            }
+        }
+        else if (memcmp(chunk.id, "data", 4) == 0) {
+            if (!found_fmt) {
+                printf("wav_load: Found data before fmt chunk\n");
+                break;
+            }
+
+            data_size = chunk.size;
+            samples = malloc(data_size);
+            if (!samples) {
+                printf("wav_load: Failed to allocate memory\n");
+                break;
+            }
+
+            size_t read_size = fread(samples, 1, data_size, file);
+            if (read_size != data_size) {
+                printf("wav_load: Failed to read data. Expected %u bytes, got %zu bytes\n",
+                       data_size, read_size);
+                free(samples);
+                samples = NULL;
+                break;
+            }
+            found_data = true;
+        }
+        else {
+            // Skip unknown chunk
+            printf("Skipping chunk: %.4s\n", chunk.id);
+            if (fseek(file, chunk.size, SEEK_CUR) != 0) {
+                printf("wav_load: Failed to skip chunk\n");
+                break;
+            }
+        }
     }
 
     fclose(file);
-    return samples;
+
+    if (samples && found_fmt && found_data) {
+        printf("WAV File Info:\n");
+        printf("Format: %u\n", fmt.format);
+        printf("Channels: %u\n", fmt.channels);
+        printf("Sample Rate: %u\n", fmt.sample_rate);
+        printf("Bits per Sample: %u\n", fmt.bits_per_sample);
+        printf("Data Size: %u\n", data_size);
+        
+        *length = data_size / sizeof(int16_t);
+        return samples;
+    }
+
+    if (samples) {
+        free(samples);
+    }
+    return NULL;
 }
 
 bool wav_save(const char* filename, int16_t* samples, size_t length) {
