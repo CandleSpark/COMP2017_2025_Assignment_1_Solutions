@@ -9,11 +9,6 @@ struct chunk_header {
     uint32_t size;
 };
 
-// Forward declarations of static functions
-static struct audio_node* create_shared_node(struct sound_seg* owner,
-                                           size_t start, size_t length);
-static bool split_node(struct audio_node* node, size_t pos);
-
 // WAV format chunk
 struct fmt_chunk {
     uint16_t format;
@@ -201,38 +196,37 @@ struct sound_seg* tr_init(void) {
     
     track->head = NULL;
     track->children = NULL;
-    track->parents = NULL;
+    track->parent = NULL;
     track->total_length = 0;
     return track;
+}
+
+static void free_audio_nodes(struct audio_node* head) {
+    while (head) {
+        struct audio_node* next = head->next;
+        free(head->samples);
+        free(head);
+        head = next;
+    }
+}
+
+static void free_parent_child_nodes(struct parent_child_node* head) {
+    while (head) {
+        struct parent_child_node* next = head->next;
+        free(head);
+        head = next;
+    }
 }
 
 void tr_destroy(struct sound_seg* track) {
     if (!track) return;
 
-    struct audio_node* curr = track->head;
-    while (curr) {
-        struct audio_node* next = curr->next;
-        if (curr->samples && !curr->is_shared) {
-            free(curr->samples);
-        }
-        free(curr);
-        curr = next;
-    }
+    // Free audio nodes
+    free_audio_nodes(track->head);
 
     // Free parent-child relationship nodes
-    struct parent_child_node* child = track->children;
-    while (child) {
-        struct parent_child_node* next = child->next;
-        free(child);
-        child = next;
-    }
-
-    struct parent_child_node* parent = track->parents;
-    while (parent) {
-        struct parent_child_node* next = parent->next;
-        free(parent);
-        parent = next;
-    }
+    free_parent_child_nodes(track->children);
+    free(track->parent);
 
     free(track);
 }
@@ -275,81 +269,59 @@ bool tr_read(struct sound_seg* track, size_t pos, size_t len, int16_t* buffer) {
 bool tr_write(struct sound_seg* track, size_t pos, size_t len, const int16_t* buffer) {
     if (!track || !buffer) return false;
 
-    struct audio_node* curr = track->head;
-    struct audio_node* prev = NULL;
-    size_t curr_pos = 0;
+    // If write position exceeds current length, extend the track
+    if (pos + len > track->total_length) {
+        size_t new_samples = pos + len - track->total_length;
+        int16_t* new_data = calloc(new_samples, sizeof(int16_t));
+        if (!new_data) return false;
 
-    // Find the node containing the write position
-    while (curr && curr_pos + curr->length <= pos) {
-        curr_pos += curr->length;
-        prev = curr;
-        curr = curr->next;
-    }
-
-    // If writing past the end, create a new node
-    if (!curr && pos >= track->total_length) {
         struct audio_node* new_node = malloc(sizeof(struct audio_node));
-        if (!new_node) return false;
-
-        new_node->samples = malloc(len * sizeof(int16_t));
-        if (!new_node->samples) {
-            free(new_node);
+        if (!new_node) {
+            free(new_data);
             return false;
         }
 
-        memcpy(new_node->samples, buffer, len * sizeof(int16_t));
+        new_node->samples = new_data;
         new_node->start = 0;
-        new_node->length = len;
-        new_node->is_shared = false;
-        new_node->owner = NULL;
+        new_node->length = new_samples;
         new_node->next = NULL;
 
-        if (prev) {
-            prev->next = new_node;
-        } else {
+        if (!track->head) {
             track->head = new_node;
+        } else {
+            struct audio_node* last = track->head;
+            while (last->next) last = last->next;
+            last->next = new_node;
         }
 
         track->total_length = pos + len;
-        return true;
     }
 
-    // Handle writing to existing nodes
-    size_t buffer_offset = 0;
-    while (buffer_offset < len && curr) {
-        size_t write_pos = pos - curr_pos;
-        size_t write_len = len - buffer_offset;
-        if (write_len > curr->length - write_pos) {
-            write_len = curr->length - write_pos;
-        }
-
-        // If node is shared, create a new unshared copy
-        if (curr->is_shared) {
-            int16_t* new_samples = malloc(curr->length * sizeof(int16_t));
-            if (!new_samples) return false;
-
-            // Copy existing data
-            memcpy(new_samples, curr->samples + curr->start, 
-                  curr->length * sizeof(int16_t));
-
-            // Update node
-            curr->samples = new_samples;
-            curr->start = 0;
-            curr->is_shared = false;
-            curr->owner = NULL;
-        }
-
-        // Write the data
-        memcpy(curr->samples + curr->start + write_pos,
-               buffer + buffer_offset,
-               write_len * sizeof(int16_t));
-
-        buffer_offset += write_len;
-        curr_pos += curr->length;
-        curr = curr->next;
+    // Write data
+    size_t written = 0;
+    struct audio_node* node = track->head;
+    
+    while (node && pos >= node->length) {
+        pos -= node->length;
+        node = node->next;
     }
 
-    return buffer_offset == len;
+    while (node && written < len) {
+        size_t copy_len = len - written;
+        if (copy_len > node->length - pos) {
+            copy_len = node->length - pos;
+        }
+
+        memcpy(node->samples + node->start + pos,
+               buffer + written,
+               copy_len * sizeof(int16_t));
+
+        written += copy_len;
+        pos = 0;
+        node = node->next;
+    }
+
+    return true;
 }
 
 bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
@@ -365,59 +337,67 @@ bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
         child = child->next;
     }
 
-    // Find the node containing the start position
-    struct audio_node* curr = track->head;
-    struct audio_node* prev = NULL;
-    size_t curr_pos = 0;
+    // Create new node to store data after deletion
+    struct audio_node* new_head = NULL;
+    struct audio_node* new_tail = NULL;
+    size_t new_length = track->total_length - len;
 
-    while (curr && curr_pos + curr->length <= pos) {
-        curr_pos += curr->length;
-        prev = curr;
-        curr = curr->next;
-    }
+    // Copy the first part
+    if (pos > 0) {
+        new_head = malloc(sizeof(struct audio_node));
+        if (!new_head) return false;
 
-    if (!curr) return false;
-
-    // Split the first node if necessary
-    if (pos > curr_pos) {
-        if (!split_node(curr, pos - curr_pos)) {
+        new_head->samples = malloc(pos * sizeof(int16_t));
+        if (!new_head->samples) {
+            free(new_head);
             return false;
         }
-        prev = curr;
-        curr = curr->next;
-        curr_pos = pos;
+
+        tr_read(track, 0, pos, new_head->samples);
+        new_head->start = 0;
+        new_head->length = pos;
+        new_head->next = NULL;
+        new_tail = new_head;
     }
 
-    // Remove nodes until we've covered the length to delete
-    size_t remaining = len;
-    while (curr && remaining > 0) {
-        if (curr->length <= remaining) {
-            // Remove entire node
-            remaining -= curr->length;
-            struct audio_node* to_delete = curr;
-            curr = curr->next;
-            
-            if (prev) {
-                prev->next = curr;
-            } else {
-                track->head = curr;
+    // Copy the second part
+    if (pos + len < track->total_length) {
+        struct audio_node* after = malloc(sizeof(struct audio_node));
+        if (!after) {
+            if (new_head) {
+                free(new_head->samples);
+                free(new_head);
             }
-
-            if (!to_delete->is_shared) {
-                free(to_delete->samples);
-            }
-            free(to_delete);
-        } else {
-            // Split this node and keep the latter part
-            if (!split_node(curr, remaining)) {
-                return false;
-            }
-            curr = curr->next;
-            remaining = 0;
+            return false;
         }
+
+        size_t after_len = track->total_length - (pos + len);
+        after->samples = malloc(after_len * sizeof(int16_t));
+        if (!after->samples) {
+            free(after);
+            if (new_head) {
+                free(new_head->samples);
+                free(new_head);
+            }
+            return false;
+        }
+
+        tr_read(track, pos + len, after_len, after->samples);
+        after->start = 0;
+        after->length = after_len;
+        after->next = NULL;
+
+        if (new_tail)
+            new_tail->next = after;
+        else
+            new_head = after;
     }
 
-    track->total_length -= len;
+    // Free original nodes
+    free_audio_nodes(track->head);
+    track->head = new_head;
+    track->total_length = new_length;
+
     return true;
 }
 
@@ -432,11 +412,6 @@ static double cross_correlation(const int16_t* x, const int16_t* y,
         sum += (double)x[i + offset] * y[i];
         norm_x += (double)x[i + offset] * x[i + offset];
         norm_y += (double)y[i] * y[i];
-    }
-
-    // Check for zero division
-    if (norm_x == 0 || norm_y == 0) {
-        return 0;
     }
 
     return sum / sqrt(norm_x * norm_y);
@@ -519,123 +494,20 @@ bool tr_insert(struct sound_seg* dest_track, size_t destpos,
         srcpos + len > src_track->total_length ||
         destpos > dest_track->total_length) return false;
 
-    // Find the source node and offset within it
-    struct audio_node* src_node = src_track->head;
-    size_t src_offset = srcpos;
-    while (src_node && src_offset >= src_node->length) {
-        src_offset -= src_node->length;
-        src_node = src_node->next;
-    }
-    if (!src_node) return false;
-
-    // Create new node that shares data with source
-    struct audio_node* shared_node = create_shared_node(src_track, 
-        src_node->start + src_offset, len);
-    if (!shared_node) return false;
-
-    shared_node->samples = src_node->samples;
-
-    // Find insertion point in destination track
-    struct audio_node* curr = dest_track->head;
-    struct audio_node* prev = NULL;
-    size_t curr_pos = 0;
-
-    while (curr && curr_pos < destpos) {
-        curr_pos += curr->length;
-        prev = curr;
-        curr = curr->next;
-    }
-
-    // Insert the new node
-    if (prev) {
-        prev->next = shared_node;
-    } else {
-        dest_track->head = shared_node;
-    }
-    shared_node->next = curr;
-
-    // Create parent-child relationship node
+    // Create new parent-child relationship node
     struct parent_child_node* relation = malloc(sizeof(struct parent_child_node));
-    if (!relation) {
-        // Undo the node insertion
-        if (prev) {
-            prev->next = curr;
-        } else {
-            dest_track->head = curr;
-        }
-        free(shared_node);
-        return false;
-    }
+    if (!relation) return false;
 
     relation->parent = src_track;
     relation->parent_start = srcpos;
-    relation->child_start = destpos;
     relation->length = len;
-    relation->next = dest_track->parents;
-    dest_track->parents = relation;
+    relation->next = dest_track->children;
+    dest_track->children = relation;
 
-    // Add to parent's children list
-    struct parent_child_node* child_relation = malloc(sizeof(struct parent_child_node));
-    if (!child_relation) {
-        // Undo everything
-        if (prev) {
-            prev->next = curr;
-        } else {
-            dest_track->head = curr;
-        }
-        free(shared_node);
-        free(relation);
-        return false;
+    // Adjust target track's total length
+    if (destpos + len > dest_track->total_length) {
+        dest_track->total_length = destpos + len;
     }
-
-    child_relation->parent = dest_track;
-    child_relation->parent_start = srcpos;
-    child_relation->child_start = destpos;
-    child_relation->length = len;
-    child_relation->next = src_track->children;
-    src_track->children = child_relation;
-
-    // Update destination track length
-    dest_track->total_length = destpos + len + 
-        (curr ? curr_pos - destpos + curr->length : 0);
-
-    return true;
-}
-
-// Helper function to create a new audio node that shares data
-static struct audio_node* create_shared_node(struct sound_seg* owner,
-                                           size_t start, size_t length) {
-    struct audio_node* node = malloc(sizeof(struct audio_node));
-    if (!node) return NULL;
-
-    node->samples = NULL;  // Will be set by the caller
-    node->start = start;
-    node->length = length;
-    node->is_shared = true;
-    node->owner = owner;
-    node->next = NULL;
-
-    return node;
-}
-
-// Helper function to split a node at a given position
-static bool split_node(struct audio_node* node, size_t pos) {
-    if (pos >= node->length) return false;
-
-    struct audio_node* new_node = malloc(sizeof(struct audio_node));
-    if (!new_node) return false;
-
-    // If the original node is shared, the new node shares the same data
-    new_node->samples = node->samples;
-    new_node->start = node->start + pos;
-    new_node->length = node->length - pos;
-    new_node->is_shared = node->is_shared;
-    new_node->owner = node->owner;
-    new_node->next = node->next;
-
-    // Update original node
-    node->length = pos;
-    node->next = new_node;
 
     return true;
 }

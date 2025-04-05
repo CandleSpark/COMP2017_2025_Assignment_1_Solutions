@@ -10,8 +10,6 @@ struct audio_node {
     int16_t* samples;        // Pointer to actual audio data
     size_t start;           // Starting position in original data
     size_t length;          // Number of samples in this node
-    bool is_shared;         // Whether this node's data is shared from another track
-    struct sound_seg* owner; // Original owner of the samples (if shared)
     struct audio_node* next; // Pointer to next node
 };
 
@@ -19,7 +17,6 @@ struct audio_node {
 struct parent_child_node {
     struct sound_seg* parent;    // Parent track
     size_t parent_start;         // Starting position in parent track
-    size_t child_start;          // Starting position in child track
     size_t length;               // Length of shared data
     struct parent_child_node* next;
 };
@@ -27,8 +24,8 @@ struct parent_child_node {
 // Main track structure
 struct sound_seg {
     struct audio_node* head;          // Head of audio data linked list
-    struct parent_child_node* children; // List of tracks that share our data
-    struct parent_child_node* parents;  // List of tracks we share data from
+    struct parent_child_node* children; // List of child tracks
+    struct parent_child_node* parent;   // Parent track info (if this is a child track)
     size_t total_length;               // Total number of samples
 };
 
