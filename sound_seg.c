@@ -3,7 +3,7 @@
 #include <string.h>
 #include <math.h>
 
-// WAV文件头结构
+// WAV file header structure
 struct wav_header {
     char riff_id[4];
     uint32_t size;
@@ -20,7 +20,7 @@ struct wav_header {
     uint32_t data_size;
 };
 
-// Part 1: WAV文件交互和基本声音操作
+// Part 1: WAV file interaction and basic sound operations
 int16_t* wav_load(const char* filename, size_t* length) {
     FILE* file = fopen(filename, "rb");
     if (!file) return NULL;
@@ -31,7 +31,7 @@ int16_t* wav_load(const char* filename, size_t* length) {
         return NULL;
     }
 
-    // 验证WAV文件格式
+    // Verify WAV file format
     if (memcmp(header.riff_id, "RIFF", 4) != 0 ||
         memcmp(header.wave_id, "WAVE", 4) != 0 ||
         memcmp(header.fmt_id, "fmt ", 4) != 0 ||
@@ -122,10 +122,10 @@ static void free_parent_child_nodes(struct parent_child_node* head) {
 void tr_destroy(struct sound_seg* track) {
     if (!track) return;
 
-    // 释放音频节点
+    // Free audio nodes
     free_audio_nodes(track->head);
 
-    // 释放父子关系节点
+    // Free parent-child relationship nodes
     free_parent_child_nodes(track->children);
     free(track->parent);
 
@@ -142,13 +142,13 @@ bool tr_read(struct sound_seg* track, size_t pos, size_t len, int16_t* buffer) {
     size_t buffer_pos = 0;
     struct audio_node* node = track->head;
     
-    // 找到起始节点
+    // Find the starting node
     while (node && pos >= node->length) {
         pos -= node->length;
         node = node->next;
     }
 
-    // 读取数据
+    // Read data
     while (node && buffer_pos < len) {
         size_t copy_len = len - buffer_pos;
         if (copy_len > node->length - pos) {
@@ -170,7 +170,7 @@ bool tr_read(struct sound_seg* track, size_t pos, size_t len, int16_t* buffer) {
 bool tr_write(struct sound_seg* track, size_t pos, size_t len, const int16_t* buffer) {
     if (!track || !buffer) return false;
 
-    // 如果写入位置超出当前长度，需要扩展音轨
+    // If write position exceeds current length, extend the track
     if (pos + len > track->total_length) {
         size_t new_samples = pos + len - track->total_length;
         int16_t* new_data = calloc(new_samples, sizeof(int16_t));
@@ -198,7 +198,7 @@ bool tr_write(struct sound_seg* track, size_t pos, size_t len, const int16_t* bu
         track->total_length = pos + len;
     }
 
-    // 写入数据
+    // Write data
     size_t written = 0;
     struct audio_node* node = track->head;
     
@@ -228,7 +228,7 @@ bool tr_write(struct sound_seg* track, size_t pos, size_t len, const int16_t* bu
 bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
     if (!track || pos + len > track->total_length) return false;
 
-    // 检查是否有子片段引用这个范围
+    // Check if any child segments reference this range
     struct parent_child_node* child = track->children;
     while (child) {
         if (child->parent_start < pos + len && 
@@ -238,12 +238,12 @@ bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
         child = child->next;
     }
 
-    // 创建新节点存储删除后的数据
+    // Create new node to store data after deletion
     struct audio_node* new_head = NULL;
     struct audio_node* new_tail = NULL;
     size_t new_length = track->total_length - len;
 
-    // 复制前半部分
+    // Copy the first part
     if (pos > 0) {
         new_head = malloc(sizeof(struct audio_node));
         if (!new_head) return false;
@@ -261,7 +261,7 @@ bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
         new_tail = new_head;
     }
 
-    // 复制后半部分
+    // Copy the second part
     if (pos + len < track->total_length) {
         struct audio_node* after = malloc(sizeof(struct audio_node));
         if (!after) {
@@ -294,7 +294,7 @@ bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
             new_head = after;
     }
 
-    // 释放原有节点
+    // Free original nodes
     free_audio_nodes(track->head);
     track->head = new_head;
     track->total_length = new_length;
@@ -302,7 +302,7 @@ bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
     return true;
 }
 
-// Part 2: 广告识别
+// Part 2: Advertisement identification
 static double cross_correlation(const int16_t* x, const int16_t* y, 
                               size_t len_x, size_t len_y, size_t offset) {
     double sum = 0;
@@ -322,7 +322,7 @@ char* tr_identify(struct sound_seg* target, struct sound_seg* ad) {
     if (!target || !ad || ad->total_length > target->total_length) 
         return strdup("");
 
-    // 计算广告的自相关值（零延迟）
+    // Calculate advertisement's autocorrelation (zero delay)
     int16_t* ad_buffer = malloc(ad->total_length * sizeof(int16_t));
     if (!ad_buffer) return strdup("");
     tr_read(ad, 0, ad->total_length, ad_buffer);
@@ -331,7 +331,7 @@ char* tr_identify(struct sound_seg* target, struct sound_seg* ad) {
                                          ad->total_length, ad->total_length, 0);
     double threshold = ad_autocorr * 0.95;
 
-    // 在目标中搜索广告
+    // Search for advertisement in target
     char* result = NULL;
     size_t result_capacity = 256;
     result = malloc(result_capacity);
@@ -372,14 +372,14 @@ char* tr_identify(struct sound_seg* target, struct sound_seg* ad) {
             }
             
             strcat(result, temp);
-            i += ad->total_length - 1; // 跳过已匹配的部分
+            i += ad->total_length - 1; // Skip matched portion
         }
     }
 
     free(ad_buffer);
     free(target_buffer);
 
-    // 移除最后的换行符（如果存在）
+    // Remove trailing newline (if exists)
     size_t len = strlen(result);
     if (len > 0 && result[len - 1] == '\n') {
         result[len - 1] = '\0';
@@ -388,14 +388,14 @@ char* tr_identify(struct sound_seg* target, struct sound_seg* ad) {
     return result;
 }
 
-// Part 3: 复杂插入
+// Part 3: Complex insertion
 bool tr_insert(struct sound_seg* dest_track, size_t destpos,
               struct sound_seg* src_track, size_t srcpos, size_t len) {
     if (!dest_track || !src_track || 
         srcpos + len > src_track->total_length ||
         destpos > dest_track->total_length) return false;
 
-    // 创建新的父子关系节点
+    // Create new parent-child relationship node
     struct parent_child_node* relation = malloc(sizeof(struct parent_child_node));
     if (!relation) return false;
 
@@ -405,7 +405,7 @@ bool tr_insert(struct sound_seg* dest_track, size_t destpos,
     relation->next = dest_track->children;
     dest_track->children = relation;
 
-    // 调整目标音轨的总长度
+    // Adjust target track's total length
     if (destpos + len > dest_track->total_length) {
         dest_track->total_length = destpos + len;
     }
@@ -413,7 +413,7 @@ bool tr_insert(struct sound_seg* dest_track, size_t destpos,
     return true;
 }
 
-// Part 4: 清理
+// Part 4: Cleanup
 void tr_resolve(struct sound_seg** tracks, size_t num_tracks) {
     if (!tracks || num_tracks == 0) return;
 
@@ -425,13 +425,13 @@ void tr_resolve(struct sound_seg** tracks, size_t num_tracks) {
             struct sound_seg* other = tracks[j];
             if (!other || i == j) continue;
 
-            // 检查是否存在直接父子关系
+            // Check for direct parent-child relationship
             struct parent_child_node* prev = NULL;
             struct parent_child_node* curr = other->children;
 
             while (curr) {
                 if (curr->parent == track) {
-                    // 复制共享数据
+                    // Copy shared data
                     int16_t* buffer = malloc(curr->length * sizeof(int16_t));
                     if (!buffer) break;
 
@@ -439,7 +439,7 @@ void tr_resolve(struct sound_seg** tracks, size_t num_tracks) {
                     tr_write(other, curr->parent_start, curr->length, buffer);
                     free(buffer);
 
-                    // 断开关系
+                    // Break the relationship
                     if (prev)
                         prev->next = curr->next;
                     else
