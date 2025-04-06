@@ -1,28 +1,25 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -g -fsanitize=address
-LDFLAGS = -fsanitize=address
+LDFLAGS = -fsanitize=address -lm
 
 SRCS = sound_seg.c
 OBJS = $(SRCS:.c=.o)
-TEST_SRCS = tests/test_sound_seg.c
-TEST_OBJS = $(TEST_SRCS:.c=.o)
 
-.PHONY: all clean test
+.PHONY: all clean editor
 
-all: libsoundseg.a test_sound_seg
+all: sound_editor
 
-libsoundseg.a: $(OBJS)
-	$(CC) -c -o $@ $^
-	ar rcs $@ $^
+sound_editor: main.o sound_seg.o
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-test_sound_seg: $(TEST_OBJS) libsoundseg.a
-	$(CC) $(LDFLAGS) -o $@ $^
+main.o: main.c sound_seg.h
+	$(CC) $(CFLAGS) -c $< -o $@
 
-test: test_sound_seg
-	./test_sound_seg
+editor: sound_editor
+	./sound_editor
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(TEST_OBJS) libsoundseg.a test_sound_seg 
+	rm -f sound_editor *.o 

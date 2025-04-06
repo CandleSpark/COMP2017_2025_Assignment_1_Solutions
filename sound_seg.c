@@ -647,14 +647,11 @@ bool tr_insert(struct sound_seg* dest_track, size_t destpos,
     if (!src_node) return false;
 
     // 创建共享节点
-    struct audio_node* shared_node = malloc(sizeof(struct audio_node));
+    struct audio_node* shared_node = create_shared_node(src_track, 
+                                                      src_node->start + (srcpos - src_curr_pos),
+                                                      len);
     if (!shared_node) return false;
-
     shared_node->samples = src_node->samples;
-    shared_node->start = src_node->start + (srcpos - src_curr_pos);
-    shared_node->length = len;
-    shared_node->is_shared = true;
-    shared_node->owner = src_track;
 
     // 找到目标位置
     struct audio_node* dest_curr = dest_track->head;
