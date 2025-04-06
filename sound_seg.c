@@ -274,19 +274,20 @@ bool tr_read(struct sound_seg* track, size_t pos, size_t len, int16_t* buffer) {
 
 bool tr_write(struct sound_seg* track, size_t pos, size_t len, const int16_t* buffer) {
     if (!track || !buffer) return false;
+    if (len == 0) return true;
 
+    // 找到写入位置
     struct audio_node* curr = track->head;
     struct audio_node* prev = NULL;
     size_t curr_pos = 0;
 
-    // Find the node containing the write position
     while (curr && curr_pos + curr->length <= pos) {
         curr_pos += curr->length;
         prev = curr;
         curr = curr->next;
     }
 
-    // If writing past the end, create a new node
+    // 如果写入位置超出当前长度，需要创建新节点
     if (!curr && pos >= track->total_length) {
         struct audio_node* new_node = malloc(sizeof(struct audio_node));
         if (!new_node) return false;
@@ -314,62 +315,123 @@ bool tr_write(struct sound_seg* track, size_t pos, size_t len, const int16_t* bu
         return true;
     }
 
-    // Handle writing to existing nodes
-    size_t buffer_offset = 0;
-    while (buffer_offset < len && curr) {
-        size_t write_pos = pos - curr_pos;
-        size_t write_len = len - buffer_offset;
-        if (write_len > curr->length - write_pos) {
-            write_len = curr->length - write_pos;
+    // 处理写入位置在现有节点内的情况
+    while (len > 0 && curr) {
+        size_t write_offset = pos - curr_pos;
+        size_t write_len = len;
+        
+        if (write_len > curr->length - write_offset) {
+            write_len = curr->length - write_offset;
         }
 
-        // If node is shared, create a new unshared copy
+        // 如果是共享节点，需要创建新的非共享副本
         if (curr->is_shared) {
             int16_t* new_samples = malloc(curr->length * sizeof(int16_t));
             if (!new_samples) return false;
 
-            // Copy existing data
-            memcpy(new_samples, curr->samples + curr->start, 
-                  curr->length * sizeof(int16_t));
+            // 复制原有数据
+            memcpy(new_samples, curr->samples + curr->start, curr->length * sizeof(int16_t));
+            
+            // 写入新数据
+            memcpy(new_samples + write_offset, buffer, write_len * sizeof(int16_t));
 
-            // Update node
+            // 更新节点
             curr->samples = new_samples;
             curr->start = 0;
             curr->is_shared = false;
             curr->owner = NULL;
+        } else {
+            // 直接写入非共享节点
+            memcpy(curr->samples + curr->start + write_offset, 
+                   buffer, write_len * sizeof(int16_t));
         }
 
-        // Write the data
-        memcpy(curr->samples + curr->start + write_pos,
-               buffer + buffer_offset,
-               write_len * sizeof(int16_t));
-
-        buffer_offset += write_len;
+        // 更新位置和长度
+        buffer += write_len;
+        len -= write_len;
+        pos += write_len;
         curr_pos += curr->length;
         curr = curr->next;
     }
 
-    return buffer_offset == len;
+    // 如果还有数据需要写入，创建新节点
+    if (len > 0) {
+        struct audio_node* new_node = malloc(sizeof(struct audio_node));
+        if (!new_node) return false;
+
+        new_node->samples = malloc(len * sizeof(int16_t));
+        if (!new_node->samples) {
+            free(new_node);
+            return false;
+        }
+
+        memcpy(new_node->samples, buffer, len * sizeof(int16_t));
+        new_node->start = 0;
+        new_node->length = len;
+        new_node->is_shared = false;
+        new_node->owner = NULL;
+        new_node->next = curr;
+
+        if (prev) {
+            prev->next = new_node;
+        } else {
+            track->head = new_node;
+        }
+
+        track->total_length = pos + len;
+    }
+
+    // 更新总长度（如果需要）
+    if (pos + len > track->total_length) {
+        track->total_length = pos + len;
+    }
+
+    return true;
+}
+
+// 辅助函数：分割节点
+static bool split_node(struct audio_node* node, size_t pos) {
+    if (!node || pos >= node->length) return false;
+
+    struct audio_node* new_node = malloc(sizeof(struct audio_node));
+    if (!new_node) return false;
+
+    // 设置新节点
+    new_node->samples = node->samples;
+    new_node->start = node->start + pos;
+    new_node->length = node->length - pos;
+    new_node->is_shared = node->is_shared;
+    new_node->owner = node->owner;
+    new_node->next = node->next;
+
+    // 更新原节点
+    node->length = pos;
+    node->next = new_node;
+
+    return true;
 }
 
 bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
+    // 基本参数检查
     if (!track || pos + len > track->total_length) return false;
+    if (len == 0) return true;
 
-    // Check if any child segments reference this range
+    // 检查子段引用
     struct parent_child_node* child = track->children;
     while (child) {
         if (child->parent_start < pos + len && 
             child->parent_start + child->length > pos) {
-            return false;
+            return false;  // 存在子段引用，不能删除
         }
         child = child->next;
     }
 
-    // Find the node containing the start position
+    // 找到起始节点
     struct audio_node* curr = track->head;
     struct audio_node* prev = NULL;
     size_t curr_pos = 0;
 
+    // 定位到起始位置
     while (curr && curr_pos + curr->length <= pos) {
         curr_pos += curr->length;
         prev = curr;
@@ -378,7 +440,7 @@ bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
 
     if (!curr) return false;
 
-    // Split the first node if necessary
+    // 如果删除起点在节点中间，先分割节点
     if (pos > curr_pos) {
         if (!split_node(curr, pos - curr_pos)) {
             return false;
@@ -388,35 +450,86 @@ bool tr_delete_range(struct sound_seg* track, size_t pos, size_t len) {
         curr_pos = pos;
     }
 
-    // Remove nodes until we've covered the length to delete
-    size_t remaining = len;
-    while (curr && remaining > 0) {
-        if (curr->length <= remaining) {
-            // Remove entire node
-            remaining -= curr->length;
-            struct audio_node* to_delete = curr;
-            curr = curr->next;
-            
-            if (prev) {
-                prev->next = curr;
-            } else {
-                track->head = curr;
-            }
+    // 删除完整的节点
+    while (curr && curr_pos + curr->length <= pos + len) {
+        struct audio_node* to_delete = curr;
+        curr = curr->next;
+        curr_pos += to_delete->length;
 
-            if (!to_delete->is_shared) {
-                free(to_delete->samples);
-            }
-            free(to_delete);
+        // 更新链表
+        if (prev) {
+            prev->next = curr;
         } else {
-            // Split this node and keep the latter part
-            if (!split_node(curr, remaining)) {
-                return false;
+            track->head = curr;
+        }
+
+        // 释放节点
+        if (!to_delete->is_shared) {
+            free(to_delete->samples);
+        }
+        free(to_delete);
+    }
+
+    // 处理最后一个节点（如果需要）
+    if (curr && curr_pos < pos + len) {
+        size_t remaining = pos + len - curr_pos;
+        
+        if (remaining < curr->length) {
+            if (curr->is_shared) {
+                // 保存原始节点指针
+                struct audio_node* node_to_delete = curr;
+                
+                // 对于共享节点，使用分割
+                if (!split_node(node_to_delete, remaining)) {
+                    return false;
+                }
+                
+                // 更新链表连接
+                if (prev) {
+                    prev->next = node_to_delete->next;
+                } else {
+                    track->head = node_to_delete->next;
+                }
+                
+                // curr 指向保留的部分
+                curr = node_to_delete->next;
+                
+                // 释放代表被删除部分的节点结构体
+                free(node_to_delete);
+            } else {
+                // 对于非共享节点，使用 memmove + realloc
+                size_t keep_len = curr->length - remaining;
+                if (keep_len > 0) {
+                    memmove(curr->samples, curr->samples + remaining,
+                           keep_len * sizeof(int16_t));
+                    
+                    int16_t* resized = realloc(curr->samples, keep_len * sizeof(int16_t));
+                    if (!resized && keep_len > 0) {
+                        return false;
+                    }
+                    curr->samples = resized;
+                } else {
+                    free(curr->samples);
+                    curr->samples = NULL;
+                }
+                curr->length = keep_len;
+                curr->start = 0;
             }
-            curr = curr->next;
-            remaining = 0;
+        } else {
+            // 删除整个节点
+            if (!curr->is_shared) {
+                free(curr->samples);
+            }
+            free(curr);
+            if (prev) {
+                prev->next = curr->next;
+            } else {
+                track->head = curr->next;
+            }
         }
     }
 
+    // 更新总长度
     track->total_length -= len;
     return true;
 }
@@ -515,53 +628,88 @@ char* tr_identify(struct sound_seg* target, struct sound_seg* ad) {
 // Part 3: Complex insertion
 bool tr_insert(struct sound_seg* dest_track, size_t destpos,
               struct sound_seg* src_track, size_t srcpos, size_t len) {
+    // 基本参数检查
     if (!dest_track || !src_track || 
         srcpos + len > src_track->total_length ||
         destpos > dest_track->total_length) return false;
+    
+    if (len == 0) return true;
 
-    // Find the source node and offset within it
+    // 找到源节点
     struct audio_node* src_node = src_track->head;
-    size_t src_offset = srcpos;
-    while (src_node && src_offset >= src_node->length) {
-        src_offset -= src_node->length;
+    size_t src_curr_pos = 0;
+
+    while (src_node && src_curr_pos + src_node->length <= srcpos) {
+        src_curr_pos += src_node->length;
         src_node = src_node->next;
     }
+
     if (!src_node) return false;
 
-    // Create new node that shares data with source
-    struct audio_node* shared_node = create_shared_node(src_track, 
-        src_node->start + src_offset, len);
+    // 创建共享节点
+    struct audio_node* shared_node = malloc(sizeof(struct audio_node));
     if (!shared_node) return false;
 
     shared_node->samples = src_node->samples;
+    shared_node->start = src_node->start + (srcpos - src_curr_pos);
+    shared_node->length = len;
+    shared_node->is_shared = true;
+    shared_node->owner = src_track;
 
-    // Find insertion point in destination track
-    struct audio_node* curr = dest_track->head;
-    struct audio_node* prev = NULL;
-    size_t curr_pos = 0;
+    // 找到目标位置
+    struct audio_node* dest_curr = dest_track->head;
+    struct audio_node* dest_prev = NULL;
+    size_t dest_curr_pos = 0;
 
-    while (curr && curr_pos < destpos) {
-        curr_pos += curr->length;
-        prev = curr;
-        curr = curr->next;
+    while (dest_curr && dest_curr_pos + dest_curr->length <= destpos) {
+        dest_curr_pos += dest_curr->length;
+        dest_prev = dest_curr;
+        dest_curr = dest_curr->next;
     }
 
-    // Insert the new node
-    if (prev) {
-        prev->next = shared_node;
+    // 如果插入位置在现有节点内部，需要分割该节点
+    if (dest_curr && dest_curr_pos < destpos) {
+        // 创建新节点存储分割后的后半部分
+        struct audio_node* split_node = malloc(sizeof(struct audio_node));
+        if (!split_node) {
+            free(shared_node);
+            return false;
+        }
+
+        // 设置分割节点
+        split_node->samples = dest_curr->samples;
+        split_node->start = dest_curr->start + (destpos - dest_curr_pos);
+        split_node->length = dest_curr->length - (destpos - dest_curr_pos);
+        split_node->is_shared = dest_curr->is_shared;
+        split_node->owner = dest_curr->owner;
+        split_node->next = dest_curr->next;
+
+        // 更新当前节点
+        dest_curr->length = destpos - dest_curr_pos;
+        dest_curr->next = shared_node;
+        shared_node->next = split_node;
+        
+        // 更新指针关系
+        dest_prev = dest_curr;
+        dest_curr = split_node;
     } else {
-        dest_track->head = shared_node;
+        // 直接插入节点
+        shared_node->next = dest_curr;
+        if (dest_prev) {
+            dest_prev->next = shared_node;
+        } else {
+            dest_track->head = shared_node;
+        }
     }
-    shared_node->next = curr;
 
-    // Create parent-child relationship node
+    // 创建父子关系节点
     struct parent_child_node* relation = malloc(sizeof(struct parent_child_node));
     if (!relation) {
-        // Undo the node insertion
-        if (prev) {
-            prev->next = curr;
+        // 回滚节点插入
+        if (dest_prev) {
+            dest_prev->next = dest_curr;
         } else {
-            dest_track->head = curr;
+            dest_track->head = dest_curr;
         }
         free(shared_node);
         return false;
@@ -574,14 +722,14 @@ bool tr_insert(struct sound_seg* dest_track, size_t destpos,
     relation->next = dest_track->parents;
     dest_track->parents = relation;
 
-    // Add to parent's children list
+    // 添加到源轨道的子节点列表
     struct parent_child_node* child_relation = malloc(sizeof(struct parent_child_node));
     if (!child_relation) {
-        // Undo everything
-        if (prev) {
-            prev->next = curr;
+        // 回滚所有更改
+        if (dest_prev) {
+            dest_prev->next = dest_curr;
         } else {
-            dest_track->head = curr;
+            dest_track->head = dest_curr;
         }
         free(shared_node);
         free(relation);
@@ -595,9 +743,8 @@ bool tr_insert(struct sound_seg* dest_track, size_t destpos,
     child_relation->next = src_track->children;
     src_track->children = child_relation;
 
-    // Update destination track length
-    dest_track->total_length = destpos + len + 
-        (curr ? curr_pos - destpos + curr->length : 0);
+    // 简单更新总长度
+    dest_track->total_length += len;
 
     return true;
 }
@@ -618,28 +765,6 @@ static struct audio_node* create_shared_node(struct sound_seg* owner,
     return node;
 }
 
-// Helper function to split a node at a given position
-static bool split_node(struct audio_node* node, size_t pos) {
-    if (pos >= node->length) return false;
-
-    struct audio_node* new_node = malloc(sizeof(struct audio_node));
-    if (!new_node) return false;
-
-    // If the original node is shared, the new node shares the same data
-    new_node->samples = node->samples;
-    new_node->start = node->start + pos;
-    new_node->length = node->length - pos;
-    new_node->is_shared = node->is_shared;
-    new_node->owner = node->owner;
-    new_node->next = node->next;
-
-    // Update original node
-    node->length = pos;
-    node->next = new_node;
-
-    return true;
-}
-
 // Part 4: Cleanup
 void tr_resolve(struct sound_seg** tracks, size_t num_tracks) {
     if (!tracks || num_tracks == 0) return;
@@ -652,32 +777,58 @@ void tr_resolve(struct sound_seg** tracks, size_t num_tracks) {
             struct sound_seg* other = tracks[j];
             if (!other || i == j) continue;
 
-            // Check for direct parent-child relationship
-            struct parent_child_node* prev = NULL;
-            struct parent_child_node* curr = other->children;
+            // 处理 other 作为 track 的子轨道的情况
+            struct parent_child_node* prev_child = NULL;
+            struct parent_child_node* curr_child = track->children;
 
-            while (curr) {
-                if (curr->parent == track) {
-                    // Copy shared data
-                    int16_t* buffer = malloc(curr->length * sizeof(int16_t));
-                    if (!buffer) break;
+            while (curr_child) {
+                if (curr_child->parent == other) {
+                    // 复制共享数据
+                    int16_t* buffer = malloc(curr_child->length * sizeof(int16_t));
+                    if (!buffer) break;  // 内存分配失败，跳过此关系
 
-                    tr_read(track, curr->parent_start, curr->length, buffer);
-                    tr_write(other, curr->parent_start, curr->length, buffer);
+                    if (tr_read(track, curr_child->parent_start, 
+                              curr_child->length, buffer)) {
+                        tr_write(other, curr_child->child_start, 
+                                curr_child->length, buffer);
+                    }
                     free(buffer);
 
-                    // Break the relationship
-                    if (prev)
-                        prev->next = curr->next;
-                    else
-                        other->children = curr->next;
+                    // 从子列表中移除关系
+                    if (prev_child) {
+                        prev_child->next = curr_child->next;
+                    } else {
+                        track->children = curr_child->next;
+                    }
 
-                    struct parent_child_node* to_free = curr;
-                    curr = curr->next;
+                    // 从父列表中移除对应关系
+                    struct parent_child_node* prev_parent = NULL;
+                    struct parent_child_node* curr_parent = other->parents;
+                    while (curr_parent) {
+                        if (curr_parent->parent == track &&
+                            curr_parent->parent_start == curr_child->parent_start &&
+                            curr_parent->child_start == curr_child->child_start &&
+                            curr_parent->length == curr_child->length) {
+                            
+                            if (prev_parent) {
+                                prev_parent->next = curr_parent->next;
+                            } else {
+                                other->parents = curr_parent->next;
+                            }
+                            
+                            free(curr_parent);
+                            break;
+                        }
+                        prev_parent = curr_parent;
+                        curr_parent = curr_parent->next;
+                    }
+
+                    struct parent_child_node* to_free = curr_child;
+                    curr_child = curr_child->next;
                     free(to_free);
                 } else {
-                    prev = curr;
-                    curr = curr->next;
+                    prev_child = curr_child;
+                    curr_child = curr_child->next;
                 }
             }
         }

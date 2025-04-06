@@ -1,20 +1,28 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -Wvla -fPIC -g
-LDFLAGS = -lm
+CFLAGS = -Wall -Wextra -g -fsanitize=address
+LDFLAGS = -fsanitize=address
 
-all: sound_editor
+SRCS = sound_seg.c
+OBJS = $(SRCS:.c=.o)
+TEST_SRCS = tests/test_sound_seg.c
+TEST_OBJS = $(TEST_SRCS:.c=.o)
 
-# Rule required by assignment spec
-sound_seg.o: sound_seg.c sound_seg.h
-	$(CC) $(CFLAGS) -c sound_seg.c -o sound_seg.o
+.PHONY: all clean test
 
-# Make the executable depend on the required object file
-sound_editor: main.o sound_seg.o
-	$(CC) $(CFLAGS) main.o sound_seg.o -o sound_editor $(LDFLAGS)
+all: libsoundseg.a test_sound_seg
 
-main.o: main.c sound_seg.h
-	$(CC) $(CFLAGS) -c main.c
+libsoundseg.a: $(OBJS)
+	$(CC) -c -o $@ $^
+	ar rcs $@ $^
 
-.PHONY: clean
+test_sound_seg: $(TEST_OBJS) libsoundseg.a
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test: test_sound_seg
+	./test_sound_seg
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 clean:
-	rm -f sound_editor *.o 
+	rm -f $(OBJS) $(TEST_OBJS) libsoundseg.a test_sound_seg 
